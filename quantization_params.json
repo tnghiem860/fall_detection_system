@@ -1,0 +1,24 @@
+{
+    "input_shape": [
+        1,
+        150,
+        3
+    ],
+    "input_dtype": "<class 'numpy.int8'>",
+    "input_scale": 0.25196051597595215,
+    "input_zero_point": -3,
+    "output_shape": [
+        1,
+        2
+    ],
+    "output_dtype": "<class 'numpy.int8'>",
+    "output_scale": 0.00390625,
+    "output_zero_point": -128,
+    "window_size": 150,
+    "num_channels": 3,
+    "target_fs_hz": 25,
+    "class_names": {
+        "0": "ADL / Non-fall",
+        "1": "Fall"
+    }
+}
