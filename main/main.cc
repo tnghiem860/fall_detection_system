@@ -12,7 +12,7 @@ extern "C" {
 #include "esp_sleep.h"
 #include "mpu6050.h"
 #include "sim_module.h"
-#include "sim_mqtt.h"
+#include "sim_firebase.h"
 #include "driver/gpio.h"
 }
 
@@ -228,8 +228,9 @@ static void trigger_alert_async(const char *reason, float confidence)
     esp_err_t r = sim_gps_start_background(PHONE_NUMBER, on_gps_update);
     if (r == ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "GPS task running, publish without location");
-        sim_mqtt_ensure_connection(6);
-        sim_mqtt_publish_fall_alert(DEVICE_ID, confidence, 0, 0, false);
+        long ts = (long)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        sim_firebase_push_fall_event(DEVICE_ID, 0.0f, 0.0f, confidence, 0, ts);
+        sim_firebase_update_status(DEVICE_ID, 0.0f, 0.0f, 0.0f, 0, 0, true, confidence, ts);
     }
 }
 
@@ -243,25 +244,25 @@ static void status_timer_cb(TimerHandle_t xTimer)
     portMEMORY_BARRIER();  // FIX #4: dam bao flag visible tren ca hai core
 }
 
-// ── Init SIM, MQTT ────────────────────────────────────────────────
-static void init_sim_and_mqtt(void)
+// ── Init SIM, Firebase ────────────────────────────────────────────
+static void init_sim_and_firebase(void)
 {
     ESP_ERROR_CHECK(sim_init());
     ESP_ERROR_CHECK(sim_check_ready());
 
-    sim_mqtt_init();
-
-    while (!sim_mqtt_wait_network()) {
-        ESP_LOGW(TAG, "MQTT network chưa sẵn sàng, thử lại 3s");
+    // Đợi mạng và khởi tạo PDP (giống như logic cũ của sim_firebase)
+    bool pdp_ok = false;
+    for (int i = 0; i < 5; i++) {
+        pdp_ok = sim_firebase_start_pdp();
+        if (pdp_ok) break;
         vTaskDelay(pdMS_TO_TICKS(3000));
     }
-
-    while (!sim_mqtt_start_pdp()) {
-        ESP_LOGW(TAG, "PDP chưa có IP, thử lại 5s");
-        vTaskDelay(pdMS_TO_TICKS(5000));
+    
+    if (!pdp_ok) {
+        ESP_LOGE(TAG, "Failed to start PDP context for Firebase!");
     }
 
-    sim_mqtt_ensure_connection(6);
+    sim_firebase_init();
     sim_gps_init();
 }
 
@@ -277,9 +278,9 @@ static void fall_detection_task(void *arg)
     ESP_ERROR_CHECK(mpu6050_init(bus_handle));
     ESP_ERROR_CHECK(ai_model_init());
 
-    init_sim_and_mqtt();
+    init_sim_and_firebase();
     sim_send_sms(PHONE_NUMBER, "HE THONG DA KHOI DONG!");
-    sim_mqtt_publish_status(DEVICE_ID, false, 0.0f);
+    sim_firebase_update_status(DEVICE_ID, 0.0f, 0.0f, 0.0f, 100, 0, false, 0.0f, 0);
 
     vTaskDelay(pdMS_TO_TICKS(2000));
    // sim_sleep();
@@ -318,23 +319,27 @@ static void fall_detection_task(void *arg)
         }
 
         // ── FIX: Xu ly ket qua GPS tu Queue (non-blocking) ───────────────
-        // gps_background_task gui ket qua vao queue; task nay xu ly MQTT.
-        // Tach biet GPS callback va MQTT -> khong con tranh UART giua 2 task.
+        // gps_background_task gui ket qua vao queue; task nay xu ly HTTP.
+        // Tach biet GPS callback va HTTP -> khong con tranh UART giua 2 task.
         gps_alert_t gps_alert;
         if (xQueueReceive(s_gps_result_queue, &gps_alert, 0) == pdTRUE) {
             ESP_LOGI(TAG, "Processing GPS alert from queue (valid=%d)", gps_alert.gps.valid);
             vTaskDelay(pdMS_TO_TICKS(500));  // cho modem on dinh
-            sim_mqtt_ensure_connection(6);
+            long ts = (long)(xTaskGetTickCount() * portTICK_PERIOD_MS);
             if (gps_alert.gps.valid) {
-                sim_mqtt_publish_fall_alert(DEVICE_ID, gps_alert.confidence,
-                                           (float)gps_alert.gps.lat,
-                                           (float)gps_alert.gps.lon, true);
-                sim_mqtt_publish_location(DEVICE_ID,
-                                         (float)gps_alert.gps.lat,
-                                         (float)gps_alert.gps.lon, "gps");
+                sim_firebase_push_fall_event(DEVICE_ID,
+                                            (float)gps_alert.gps.lat,
+                                            (float)gps_alert.gps.lon,
+                                            gps_alert.confidence, 0, ts);
+                sim_firebase_update_status(DEVICE_ID,
+                                          (float)gps_alert.gps.lat,
+                                          (float)gps_alert.gps.lon,
+                                          0.0f, 0, 0, true, gps_alert.confidence, ts);
             } else {
-                sim_mqtt_publish_fall_alert(DEVICE_ID, gps_alert.confidence,
-                                           0, 0, false);
+                sim_firebase_push_fall_event(DEVICE_ID, 0.0f, 0.0f,
+                                            gps_alert.confidence, 0, ts);
+                sim_firebase_update_status(DEVICE_ID, 0.0f, 0.0f,
+                                          0.0f, 0, 0, true, gps_alert.confidence, ts);
             }
         }
 
@@ -342,10 +347,9 @@ static void fall_detection_task(void *arg)
         portMEMORY_BARRIER();  // FIX #4: dam bao doc gia tri moi nhat tu Timer task
         if (s_status_pending) {
             s_status_pending = false;
-            if (sim_mqtt_ensure_connection(3)) {
-                sim_mqtt_publish_status(DEVICE_ID, false, 0.0f);
-                vTaskDelay(pdMS_TO_TICKS(1000));
-            }
+            long ts = (long)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+            sim_firebase_update_status(DEVICE_ID, 0.0f, 0.0f, 0.0f, 0, 0, false, 0.0f, ts);
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
 
         // ── Đọc hết FIFO ─────────────────────────────────────────────
@@ -384,9 +388,8 @@ static void fall_detection_task(void *arg)
                 EventBits_t bits = xEventGroupGetBits(active_buzzer_eg);
                 if (bits & BUZZER_CANCEL_BIT) {
                     active_buzzer_eg = NULL;
-                    if (sim_mqtt_ensure_connection(3)) {
-                        sim_mqtt_publish_status(DEVICE_ID, false, 0.0f);
-                    }
+                    long ts = (long)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+                    sim_firebase_update_status(DEVICE_ID, 0.0f, 0.0f, 0.0f, 0, 0, false, 0.0f, ts);
                 } else if (bits & BUZZER_DONE_BIT) {
                     active_buzzer_eg = NULL;
                     trigger_alert_async("FALL DETECTED", s_last_confidence);
@@ -427,6 +430,8 @@ static void fall_detection_task(void *arg)
 
             // THÊM MỚI: POST-FALL POSTURE CHECK
             // Tính trung bình gia tốc trục Y (dọc cơ thể) trong 1 giây cuối cùng (25 mẫu)
+            // [TẠM THỜI TẮT]
+            /*
             float sum_y = 0;
             for (int i = WINDOW_SIZE - 25; i < WINDOW_SIZE; i++) {
                 sum_y += window[i][1]; // Kênh 1 là trục Y
@@ -439,6 +444,7 @@ static void fall_detection_task(void *arg)
                 ESP_LOGW(TAG, "Bỏ qua Fall do tư thế đứng (avg_Y = %.2fg > 0.5g)", avg_y);
                 continue;
             }
+            */
 
             TickType_t now = xTaskGetTickCount();
             if ((now - last_alert) < pdMS_TO_TICKS(ALERT_COOLDOWN_MS)) {
@@ -514,9 +520,8 @@ static void sos_button_task(void *arg)
         if (cancelled) {
             // Sleep đang disable — modem luôn active, không cần wakeup
             vTaskDelay(pdMS_TO_TICKS(200));
-            if (sim_mqtt_ensure_connection(3)) {
-                sim_mqtt_publish_status(DEVICE_ID, false, 0.0f);
-            }
+            long ts = (long)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+            sim_firebase_update_status(DEVICE_ID, 0.0f, 0.0f, 0.0f, 0, 0, false, 0.0f, ts);
         } else {
             trigger_alert_async("MANUAL SOS", 1.0f);
         }

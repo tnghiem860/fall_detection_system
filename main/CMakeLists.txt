@@ -5,5 +5,5 @@ idf_component_register(
         ai_model
         module_sim
         mpu6050
-        sim_mqtt
+        sim_firebase
 )

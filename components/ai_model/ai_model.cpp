@@ -10,7 +10,8 @@
 static const char *TAG = "AI_MODEL";
 
 namespace {
-    using Resolver = tflite::MicroMutableOpResolver<11>;
+    // Tăng từ 11 lên 14 để dự phòng thêm các Op mới sinh ra từ Reshape
+    using Resolver = tflite::MicroMutableOpResolver<14>;
     Resolver                   *resolver      = nullptr;
     const tflite::Model        *model         = nullptr;
     tflite::MicroInterpreter   *interpreter   = nullptr;
@@ -20,7 +21,8 @@ namespace {
     // FIX (arena): Sau khi init thành công, log arena_used_bytes().
     // Điều chỉnh ARENA_SIZE = arena_used_bytes * 1.2 để có 20% headroom.
     // Giá trị 100KB là điểm khởi đầu — tăng nếu bị kAllocationFailed.
-    constexpr size_t ARENA_SIZE = 100 * 1024;
+    // Đã tăng lên 150KB do model mới có dung lượng 55KB
+    constexpr size_t ARENA_SIZE = 150 * 1024;
     static uint8_t tensor_arena[ARENA_SIZE];
 }
 
@@ -48,6 +50,11 @@ esp_err_t ai_model_init(void)
     resolver->AddMul();
     resolver->AddQuantize();
     resolver->AddDequantize();
+    
+    // Thêm các Op mới được sinh ra từ Reshape layer
+    resolver->AddShape();
+    resolver->AddStridedSlice();
+    resolver->AddPack();
 
     static tflite::MicroInterpreter static_interpreter(
         model, *resolver, tensor_arena, ARENA_SIZE);
