@@ -12,14 +12,14 @@ extern "C" {
 #define AI_TARGET_FS     25       // Hz
 
 // Quantization (từ quantization_params.json)
-#define AI_INPUT_SCALE      0.00804556f
-#define AI_INPUT_ZP         (3)
+#define AI_INPUT_SCALE      0.00816848f
+#define AI_INPUT_ZP         (-3)
 #define AI_OUTPUT_SCALE     0.00390625f
 #define AI_OUTPUT_ZP        (-128)
 
 // Normalization (từ mean_std.json)
 #define NORM_X_MIN          (-16.000000f)
-#define NORM_X_MAX          (15.992188f)
+#define NORM_X_MAX          (16.000000f)
 typedef struct {
     bool   is_fall;
     float  confidence;    // 0.0 – 1.0

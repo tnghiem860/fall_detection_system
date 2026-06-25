@@ -25,7 +25,7 @@ static const char *TAG = "FALL_MAIN";
 #define DEVICE_ID               "ESP32_FALL_001"
 #define WINDOW_SIZE             150
 #define NUM_CHANNELS            3
-#define POST_FALL_SAMPLES       25       // 75 mẫu sau impact
+#define POST_FALL_SAMPLES       75       // 75 mẫu sau impact (để căn giữa window 150 mẫu)
 // FIX #1: Threshold tính trên ±16g scale — 1.6g² = 2.56 g²
 #define IMPACT_AM2_THRESHOLD    2.56f                   // g² (AM >= 1.6g)
 #define ALERT_COOLDOWN_MS       (30 * 1000)
@@ -368,9 +368,9 @@ static void fall_detection_task(void *arg)
 
             // Nạp vào ring buffer (đổi trục khớp dataset)
             xSemaphoreTake(s_ring_mutex, portMAX_DELAY);
-            ring_buf[ring_head][0] = imu->ay_g;
-            ring_buf[ring_head][1] = -imu->ax_g;
-            ring_buf[ring_head][2] = imu->az_g;
+            ring_buf[ring_head][0] = -imu->ax_g;
+            ring_buf[ring_head][1] = -imu->ay_g;
+            ring_buf[ring_head][2] = -imu->az_g;
             ring_head = (ring_head + 1) % WINDOW_SIZE;
             if (ring_count < WINDOW_SIZE) ring_count++;
             xSemaphoreGive(s_ring_mutex);
@@ -419,11 +419,26 @@ static void fall_detection_task(void *arg)
 
             ESP_LOGI(TAG, "AI: fall=%d conf=%.3f", res.is_fall, res.confidence);
             if (!res.is_fall) continue;
-            if (res.confidence < 0.70f) {
+            if (res.confidence < 0.50f) {
             ESP_LOGW(TAG, "Fall detected nhưng confidence %.1f%% < 70%% — bỏ qua",
              res.confidence * 100.0f);
             continue;
             }           
+
+            // THÊM MỚI: POST-FALL POSTURE CHECK
+            // Tính trung bình gia tốc trục Y (dọc cơ thể) trong 1 giây cuối cùng (25 mẫu)
+            float sum_y = 0;
+            for (int i = WINDOW_SIZE - 25; i < WINDOW_SIZE; i++) {
+                sum_y += window[i][1]; // Kênh 1 là trục Y
+            }
+            float avg_y = sum_y / 25.0f;
+            
+            // Nếu |Y| > 0.5g nghĩa là người đó vẫn đang đứng/ngồi thẳng lưng (nghiêng < 60 độ)
+            // Lọc ra các hành động nhảy, dậm chân mạnh hoặc phanh gấp.
+            if (std::fabs(avg_y) > 0.5f) {
+                ESP_LOGW(TAG, "Bỏ qua Fall do tư thế đứng (avg_Y = %.2fg > 0.5g)", avg_y);
+                continue;
+            }
 
             TickType_t now = xTaskGetTickCount();
             if ((now - last_alert) < pdMS_TO_TICKS(ALERT_COOLDOWN_MS)) {
